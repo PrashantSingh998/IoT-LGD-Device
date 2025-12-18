@@ -13,6 +13,8 @@ extern const char* MQTT_BROKER;
 extern int         MQTT_PORT;
 extern const char* MQTT_USERNAME;
 extern const char* MQTT_PASSWORD;
+extern const char* MQTT_INFOTOPIC;
+
 
 // Modes / flags
 extern bool shouldRestart;

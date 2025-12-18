@@ -18,18 +18,19 @@ const char* WIFI_SSID = "";
 const char* WIFI_PASSWORD = "";
 const char* MQTT_SUBTOPIC = "";
 const char* MQTT_PUBTOPIC = "";
+const char* MQTT_KEEPALIVETOPIC = "";
 const char* MQTT_BROKER = "";
 int   MQTT_PORT = 0;
 const char* MQTT_USERNAME = "";
 const char* MQTT_PASSWORD = "";
 const char* MQTT_RESPONSETOPIC = "";
+const char* MQTT_INFOTOPIC = "";      // ⭐ NEW: info topic for device info payload
 
 bool shouldRestart = false;
 bool configMode = false;
 
-// ---- NEW: define the globals the linker complained about ----
+// ---- define globals ----
 unsigned long PUBLISH_INTERVAL_SEC = 60;   // default if not set in NVS
-bool drain_active = false;                 // default: not draining
 
 // ---- NVS init/print ----
 bool initNVS() {
@@ -67,15 +68,17 @@ void printNVSStats() {
 // ---- Load all runtime config from NVS (NO JSON) ----
 void loadConfigFromNVS() {
   // WiFi / MQTT (with sane defaults)
-  WIFI_SSID          = strdup(prefs.getString("ssid", "Airtel_INNOFARMS AI AGRITECH_4G").c_str());
-  WIFI_PASSWORD      = strdup(prefs.getString("pass", "Innofarm1008").c_str());
-  MQTT_SUBTOPIC      = strdup(prefs.getString("subtop", "farm/118/Sub").c_str());
-  MQTT_PUBTOPIC      = strdup(prefs.getString("pubtop", "farm/118/sensor").c_str());
-  MQTT_RESPONSETOPIC = strdup(prefs.getString("resptop", "farm/118/Response").c_str());
-  MQTT_BROKER        = strdup(prefs.getString("broker", "mqtt.innofarms.ai").c_str());
-  MQTT_PORT          = prefs.getInt("port", 1883);
-  MQTT_USERNAME      = strdup(prefs.getString("user", "webusers").c_str());
-  MQTT_PASSWORD      = strdup(prefs.getString("mqtpass", "innofarmweb2024").c_str());
+  WIFI_SSID           = strdup(prefs.getString("ssid",     "Airtel_INNOFARMS AI AGRITECH_4G").c_str());
+  WIFI_PASSWORD       = strdup(prefs.getString("pass",     "Innofarm1008").c_str());
+  MQTT_SUBTOPIC       = strdup(prefs.getString("subtop",   "farm/118/Sub").c_str());
+  MQTT_PUBTOPIC       = strdup(prefs.getString("pubtop",   "farm/118/sensor").c_str());
+  MQTT_KEEPALIVETOPIC = strdup(prefs.getString("keeptopic","farm/118/sensor_keepalive").c_str());
+  MQTT_RESPONSETOPIC  = strdup(prefs.getString("resptop",  "farm/118/Response").c_str());
+  MQTT_BROKER         = strdup(prefs.getString("broker",   "mqtt.innofarms.ai").c_str());
+  MQTT_PORT           = prefs.getInt("port", 1883);
+  MQTT_USERNAME       = strdup(prefs.getString("user",     "webusers").c_str());
+  MQTT_PASSWORD       = strdup(prefs.getString("mqtpass",  "innofarmweb2024").c_str());
+  MQTT_INFOTOPIC      = strdup(prefs.getString("infotop",  "farm/118/info").c_str());  // ⭐ NEW
 
   // Publish interval (seconds)
   PUBLISH_INTERVAL_SEC = prefs.getUInt("pubInt", 60);
@@ -86,10 +89,11 @@ void loadConfigFromNVS() {
   float blind = prefs.getFloat("blind", 3.0f);
 
   // If keys were missing, save defaults once (so next boot the NOT_FOUND goes away)
-  if (!prefs.isKey("pubInt")) prefs.putUInt("pubInt", PUBLISH_INTERVAL_SEC);
-  if (!prefs.isKey("tankV"))  prefs.putFloat("tankV", tankV);
-  if (!prefs.isKey("loftH"))  prefs.putFloat("loftH", loftH);
-  if (!prefs.isKey("blind"))  prefs.putFloat("blind", blind);
+  if (!prefs.isKey("pubInt"))  prefs.putUInt("pubInt",  PUBLISH_INTERVAL_SEC);
+  if (!prefs.isKey("tankV"))   prefs.putFloat("tankV",  tankV);
+  if (!prefs.isKey("loftH"))   prefs.putFloat("loftH",  loftH);
+  if (!prefs.isKey("blind"))   prefs.putFloat("blind",  blind);
+  if (!prefs.isKey("infotop")) prefs.putString("infotop", MQTT_INFOTOPIC);            // ⭐ NEW
 
   // Push tank params into the water-level math (DeviceControl)
   updateTankParams(tankV, loftH, blind);
@@ -100,7 +104,9 @@ void loadConfigFromNVS() {
   Serial.printf("WIFI_PASSWORD        : %s\n", WIFI_PASSWORD);
   Serial.printf("MQTT_SUBTOPIC        : %s\n", MQTT_SUBTOPIC);
   Serial.printf("MQTT_PUBTOPIC        : %s\n", MQTT_PUBTOPIC);
+  Serial.printf("MQTT_KEEPALIVETOPIC  : %s\n", MQTT_KEEPALIVETOPIC);
   Serial.printf("MQTT_RESPONSETOPIC   : %s\n", MQTT_RESPONSETOPIC);
+  Serial.printf("MQTT_INFOTOPIC       : %s\n", MQTT_INFOTOPIC);   // ⭐ NEW: log info topic
   Serial.printf("MQTT_BROKER          : %s\n", MQTT_BROKER);
   Serial.printf("MQTT_PORT            : %d\n", MQTT_PORT);
   Serial.printf("MQTT_USERNAME        : %s\n", MQTT_USERNAME);
@@ -143,13 +149,14 @@ bool updateConfig(
   prefs.putInt("port", MQTT_PORT);
   prefs.putString("user", MQTT_USERNAME);
   prefs.putString("mqtpass", MQTT_PASSWORD);
+  // ⚠ info topic is only handled in loadConfigFromNVS defaults for now
   prefs.end();
 
   Serial.println("✅ Partial Config Updated & Saved to NVS");
   return true;
 }
 
-// ---- FS (unchanged, kept because other parts include them) ----
+// ---- FS (unchanged) ----
 bool initFileSystem() {
   if (!LittleFS.begin(true)) {
     Serial.println(" LittleFS Mount Failed");

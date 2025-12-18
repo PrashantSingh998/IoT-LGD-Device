@@ -16,6 +16,7 @@
 
 unsigned long previousMillis = 0;
 unsigned long lastPublishedMillis = 0;
+unsigned long lastKeepaliveMillis = 0;
 
 String versionUrl ="https://innofarmsiotfirmware.blob.core.windows.net/farm118/metadata.json";
 const char* currentVersion = "1.0.5";
@@ -41,10 +42,9 @@ static bool attemptRecoveryOrRestart(std::function<bool()> recover, int tries = 
     }
     delay(delayMs);
   }
-  // if recovery fail after tries, reboot device
   safeRestart("auto-recovery-failed");
-  return false; // unreachable (esp_restart)
-}// from mqttcontrol.cpp
+  return false;
+}
 
 void setup() {
   Serial.begin(115200);
@@ -55,9 +55,9 @@ void setup() {
   printNVSStats();
 
   loadConfigFromNVS();   // fills WiFi/MQTT + PUBLISH_INTERVAL_SEC + tank params
-  initFileSystem();      // if you still need FS elsewhere
+  initFileSystem();
   initSensors();
-  initUltrasonicSensor(); // fixed UART pins from deviceControl.cpp
+  initUltrasonicSensor();
 
   if (!configMode){
     connect_to_wifi(WIFI_SSID ,WIFI_PASSWORD);
@@ -72,39 +72,33 @@ void setup() {
 }
 
 void loop() {
-  // service MQTT incoming (for drain callback)
   if (WiFi.status() == WL_CONNECTED) {
     client.loop();
   }
 
-  // periodic reconnect (15s)
   if (!configMode && millis() - previousMillis >= 15000 ){
     previousMillis = millis();
 
-    // minimal change: track consecutive WiFi/MQTT failures and reboot after threshold
     static int wifiFailCount = 0;
     static int mqttFailCount = 0;
-    const int FAIL_THRESHOLD = 5; // reboot after 5 consecutive failures
+    const int FAIL_THRESHOLD = 5;
 
     if (!checkWiFiConnection()) {
       wifiFailCount++;
       Serial.printf("WiFi not connected. wifiFailCount=%d\n", wifiFailCount);
       connect_to_wifi(WIFI_SSID ,WIFI_PASSWORD);
-      // recheck
       if (!checkWiFiConnection()) {
         if (wifiFailCount >= FAIL_THRESHOLD) {
           safeRestart("WiFi failed threshold reached");
         }
       }
     } else {
-      // reset counter on success
       if (wifiFailCount != 0) {
         Serial.println("WiFi reconnected, resetting wifiFailCount");
       }
       wifiFailCount = 0;
     }
 
-    // Ensure MQTT is connected; reconnect and count failures
     reconnect(MQTT_SUBTOPIC, MQTT_USERNAME, MQTT_PASSWORD);
     if (!client.connected()) {
       mqttFailCount++;
@@ -120,7 +114,6 @@ void loop() {
     }
   }
 
-  // read every ~5s
   static unsigned long last_read_ms = 0;
   if (millis() - last_read_ms < 5000) return;
   last_read_ms = millis();
@@ -134,27 +127,16 @@ void loop() {
   float volume_liters = calculateVolumeLiters(distance_cm);
   Serial.printf("Water present: %.2f L\n", volume_liters);
 
-  // publish on interval
+  // change-publish (>= 20 L) on configured interval
   if (!configMode && (millis() - lastPublishedMillis) >= (PUBLISH_INTERVAL_SEC * 1000UL)) {
-    // payload: {"DN":"WL","WaterLevel":<liters>}
-    String payload;
-    payload.reserve(64);
-    payload += "{\"DN\":\"WL\",\"WaterLevel\":";
-    payload += String(volume_liters, 2);
-    payload += "}";
+    bool ok = publish_water_level_if_changed(volume_liters);
 
-    // reuse mqttFailCount (declared earlier in reconnect block as static, so still accessible)
-    extern PubSubClient client; // already declared above; here to clarify usage
     static int mqttFailCount_publish = 0;
     const int FAIL_THRESHOLD_PUB = 5;
-
-    bool ok = publish(MQTT_PUBTOPIC, payload);
     if (!ok) {
       mqttFailCount_publish++;
-      Serial.printf("Publish failed, mqttFailCount_publish=%d\n", mqttFailCount_publish);
-
+      Serial.printf("publish_water_level_if_changed returned false, mqttFailCount_publish=%d\n", mqttFailCount_publish);
       reconnect(MQTT_SUBTOPIC, MQTT_USERNAME, MQTT_PASSWORD);
-
       if (!client.connected()) {
         if (mqttFailCount_publish >= FAIL_THRESHOLD_PUB) {
           safeRestart("MQTT publish failed threshold reached");
@@ -166,6 +148,33 @@ void loop() {
       }
       mqttFailCount_publish = 0;
     }
+
     lastPublishedMillis = millis();
+  }
+
+  // keepalive publish every 60s to dedicated keepalive topic
+  const unsigned long KEEPALIVE_INTERVAL_MS = 60000UL;
+  if (!configMode && (millis() - lastKeepaliveMillis) >= KEEPALIVE_INTERVAL_MS) {
+    bool ok_keepalive = publish_keepalive_water_level(volume_liters);
+
+    static int keepaliveFailCount = 0;
+    const int KEEPALIVE_FAIL_THRESHOLD = 5;
+    if (!ok_keepalive) {
+      keepaliveFailCount++;
+      Serial.printf("Keepalive publish failed, keepaliveFailCount=%d\n", keepaliveFailCount);
+      reconnect(MQTT_SUBTOPIC, MQTT_USERNAME, MQTT_PASSWORD);
+      if (!client.connected()) {
+        if (keepaliveFailCount >= KEEPALIVE_FAIL_THRESHOLD) {
+          safeRestart("Keepalive MQTT failed threshold reached");
+        }
+      }
+    } else {
+      if (keepaliveFailCount != 0) {
+        Serial.println("Keepalive publish OK, resetting keepaliveFailCount");
+      }
+      keepaliveFailCount = 0;
+    }
+
+    lastKeepaliveMillis = millis();
   }
 }

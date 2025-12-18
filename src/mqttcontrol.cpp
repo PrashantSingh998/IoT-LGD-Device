@@ -12,10 +12,54 @@
 #include <WiFiClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <esp_system.h>   // <-- for esp_random()
 
 WiFiClient espClient;
 PubSubClient client(espClient);
-extern volatile bool drain_active;
+
+// define drain_active exactly once here
+volatile bool drain_active = false;
+
+static const char* WL_PREF_NAMESPACE = "wl_ns";
+// threshold in liters for change-publish
+static constexpr float WL_DELTA = 20.0f;
+
+// Hardcoded device id
+const char* DEVICE_ID = "IFWLD1180000001";
+
+// NEW: track last hourly publish time (for 1 hr forced publish)
+static unsigned long lastHourlyPublishMs = 0;
+
+// UUID v4 generator for Packet_Id
+String generateUUID() {
+    uint8_t uuid[16];
+
+    // Fill uuid with random bytes from ESP32 hardware RNG
+    for (int i = 0; i < 16; i++) {
+        uuid[i] = (uint8_t)esp_random();
+    }
+
+    // Set version (UUID v4)
+    uuid[6] = (uuid[6] & 0x0F) | 0x40;
+
+    // Set variant (RFC4122)
+    uuid[8] = (uuid[8] & 0x3F) | 0x80;
+
+    char uuidStr[37];
+    sprintf(uuidStr,
+            "%02x%02x%02x%02x-"
+            "%02x%02x-"
+            "%02x%02x-"
+            "%02x%02x-"
+            "%02x%02x%02x%02x%02x%02x",
+            uuid[0], uuid[1], uuid[2], uuid[3],
+            uuid[4], uuid[5],
+            uuid[6], uuid[7],
+            uuid[8], uuid[9],
+            uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
+
+    return String(uuidStr);
+}
 
 void initMqtt(const char* MQTT_BROKER, int MQTT_PORT) {
     if (checkWiFiConnection()) {
@@ -65,14 +109,6 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }
 
     // ===== 1. Handle irrigation drain pause/resume =====
-    // Expected payload:
-    // {
-    //   "cmd": "irrigation",
-    //   "status": {
-    //      "task": "drain",
-    //      "status": "start" / "completed"
-    //   }
-    // }
     if (doc.containsKey("status")) {
         JsonObject st = doc["status"];
         const char* task = st["task"] | "";
@@ -176,12 +212,105 @@ bool publish(const char* topic, const String& payload) {
     return success;
 }
 
+bool publish_water_level_if_changed(float waterLevel) {
+    if (!client.connected()) {
+        Serial.println("MQTT client not connected. publish_water_level_if_changed skipped.");
+        return false;
+    }
+    if (drain_active) {
+        Serial.println("Drain active — skipping change-publish.");
+        return false;
+    }
+
+    // ----- existing 20 L logic -----
+    prefs.begin(WL_PREF_NAMESPACE, false);
+    float last = prefs.getFloat("lastWL", NAN);
+    bool shouldPublish = false;
+    if (isnan(last)) {
+        shouldPublish = true; // first-time publish
+    } else {
+        float diff = fabsf(waterLevel - last);
+        if (diff >= WL_DELTA) shouldPublish = true;
+    }
+
+    // ----- NEW: 1-hour forced publish -----
+    unsigned long now = millis();
+    const unsigned long ONE_HOUR_MS = 3600000UL; // 1 hour
+    bool oneHourElapsed = (lastHourlyPublishMs == 0) ||
+                          (now - lastHourlyPublishMs >= ONE_HOUR_MS);
+
+    if (!shouldPublish && !oneHourElapsed) {
+        // same behaviour as before when neither condition is met
+        Serial.println("No significant change in water level — skipping publish.");
+        prefs.end();
+        return false;
+    }
+
+    if (!shouldPublish && oneHourElapsed) {
+        Serial.println("1 hour elapsed — forcing periodic publish on PUB topic.");
+    }
+
+    // Build payload (same JSON, whether 20L-change or hourly)
+    DynamicJsonDocument doc(256);
+    doc["DN"] = "WL";
+    doc["WaterLevel"] = waterLevel;
+    doc["Packet_Id"] = generateUUID();
+    doc["Device_Id"] = DEVICE_ID;
+
+    String payload; serializeJson(doc, payload);
+
+    bool success = client.publish(MQTT_PUBTOPIC, payload.c_str());
+    if (success) {
+        Serial.println("Change/Hourly publish successful.");
+        Serial.print("Payload: "); Serial.println(payload);
+        prefs.putFloat("lastWL", waterLevel);   // update last published value
+        lastHourlyPublishMs = now;              // update hourly timer
+    } else {
+        Serial.println("Change/Hourly publish failed!");
+    }
+    prefs.end();
+    return success;
+}
+
+// Keepalive: publish current volume (call every 60s from your loop/timer)
+// Returns true on successful publish, false otherwise.
+bool publish_keepalive_water_level(float waterLevel) {
+    if (!client.connected()) {
+        Serial.println("MQTT client not connected. keepalive skipped.");
+        return false;
+    }
+    if (drain_active) {
+        Serial.println("Drain active — keepalive skipped.");
+        return false;
+    }
+
+    DynamicJsonDocument doc(128);
+    doc["DN"] = "WL";
+    doc["WaterLevel"] = waterLevel;
+    doc["Device_Id"] = DEVICE_ID;   // you already had this in your last paste
+    String payload; serializeJson(doc, payload);
+
+    // publish to dedicated keepalive topic from configControl (MQTT_KEEPALIVETOPIC)
+    bool success = client.publish(MQTT_KEEPALIVETOPIC, payload.c_str());
+    if (success) {
+        Serial.println("Keepalive publish successful.");
+        Serial.print("Keepalive topic: "); Serial.println(MQTT_KEEPALIVETOPIC);
+        Serial.print("Payload: "); Serial.println(payload);
+    } else {
+        Serial.println("Keepalive publish failed!");
+    }
+    return success;
+}
+
 bool publish_device_info() {
     DynamicJsonDocument doc(256);
     doc["MAC_ID"] = WiFi.macAddress();
     doc["IP"] = WiFi.localIP().toString();
     doc["CHIP_No"] = String((uint32_t)ESP.getEfuseMac());
     doc["DN"] = "WL";
+    // NEW: add Packet_Id and Device_Id for device-info packet
+   ;
+
     String jsonString; serializeJson(doc, jsonString);
-    return publish(MQTT_PUBTOPIC, jsonString);
+    return publish(MQTT_INFOTOPIC, jsonString);
 }
