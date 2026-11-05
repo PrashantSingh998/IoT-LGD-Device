@@ -1,11 +1,145 @@
+# IoT RF Gateway
 
-This directory is intended for PlatformIO Test Runner and project tests.
+ESP32-based LoRa RF Gateway using the AI-Thinker RA-02 (SX1278) module.
 
-Unit Testing is a software testing method by which individual units of
-source code, sets of one or more MCU program modules together with associated
-control data, usage procedures, and operating procedures, are tested to
-determine whether they are fit for use. Unit testing finds problems early
-in the development cycle.
+The gateway receives LoRa JSON payloads from field devices, validates the device Farm ID, and publishes valid sensor or keepalive data to MQTT.
 
-More information about PlatformIO Unit Testing:
-- https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+## Data Flow
+
+```text
+LoRa Sensor Device
+        ↓
+ESP32 + RA-02 RF Gateway
+        ↓
+MQTT Broker
+        ↓
+farm/{farm_id}/sensor
+farm/{farm_id}/sensor_keepalive
+```
+
+## Hardware Required
+
+- ESP32 DevKit
+- AI-Thinker RA-02 LoRa module
+- 433 MHz LoRa antenna
+- Stable 3.3V power supply
+- SPI jumper wires
+
+## RA-02 to ESP32 Pin Connection
+
+| RA-02 Pin | ESP32 GPIO | Purpose |
+|---|---:|---|
+| VCC | 3.3V | Power — do not use 5V |
+| GND | GND | Common ground |
+| SCK | GPIO 18 | SPI clock |
+| MISO | GPIO 19 | SPI data from RA-02 |
+| MOSI | GPIO 23 | SPI data to RA-02 |
+| NSS / NCS | GPIO 13 | SPI chip select |
+| RST | GPIO 27 | RA-02 reset |
+| DIO0 | GPIO 26 | LoRa receive interrupt pin |
+
+Unused available ESP32 pins:
+
+```text
+GPIO 25
+GPIO 33
+```
+
+## LoRa Settings
+
+Sender and receiver must use exactly the same settings:
+
+```cpp
+#define LORA_FREQUENCY 433000000L
+#define LORA_SYNC_WORD 0x34
+
+LoRa.setSpreadingFactor(7);
+LoRa.setSignalBandwidth(125000);
+LoRa.setCodingRate4(5);
+LoRa.enableCrc();
+```
+
+Sender transmit power:
+
+```cpp
+LoRa.setTxPower(17);
+```
+
+## PlatformIO Libraries
+
+Add this to `platformio.ini`:
+
+```ini
+lib_deps =
+    sandeepmistry/LoRa
+    bblanchon/ArduinoJson
+```
+
+## Example THC Sensor Payload
+
+```json
+{
+  "Etemp": 30.4,
+  "Humidity": 18.2,
+  "CO2": 527,
+  "DN": "THC",
+  "rack_id": 5,
+  "type": "sensor",
+  "Device_Id": "IFTHC1230000001",
+  "Packet_Id": "0ad4113b-d168-4d53-a32e-88c11d0adb88"
+}
+```
+
+## Example FWD Water-Level Payload
+
+```json
+{
+  "DN": "FWD",
+  "WaterLevel": 257.137146,
+  "Device_Id": "IFFWD1230000001",
+  "Packet_Id": "4a34c41b-ee93-4ea3-a870-3f845350a2cb",
+  "rack_id": 2,
+  "type": "sensor"
+}
+```
+
+## MQTT Topics
+
+```text
+farm/123/sensor
+farm/123/sensor_keepalive
+farm/123/info
+```
+
+## Device ID Format
+
+```text
+IF + DN (3 letters) + Farm ID (3 digits) + serial number
+```
+
+Example:
+
+```text
+IFTHC1230000001
+     ^^^
+     Farm ID = 123
+```
+
+The gateway only publishes a LoRa payload when its parsed Farm ID matches the locally configured `FARM_ID`.
+
+## Build and Upload
+
+```bash
+pio run
+pio run -t upload
+pio device monitor -b 115200
+```
+
+## Important Notes
+
+- Connect a proper 433 MHz antenna before transmitting.
+- RA-02 requires 3.3V power and logic levels.
+- Use `strcmp()` for DN checks, not `DN == "THC"`.
+- JSON keys are case-sensitive: `WaterLevel` and `waterLevel` are different.
+- Use a unique `Packet_Id` for every sensor packet in production.
+- Keep sender and receiver LoRa frequency, sync word, spreading factor, bandwidth, and coding rate identical.
