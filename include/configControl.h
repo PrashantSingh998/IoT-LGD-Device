@@ -5,6 +5,8 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <nvs_flash.h>
+
 
 extern Preferences prefs;
 
@@ -30,5 +32,8 @@ void createDefaultJson(const char* path);
 void printConfig(const JsonDocument &config);
 DynamicJsonDocument checkAndLoadConfig(const char *filename);
 void printNVSStats() ;
+String generateUUID();
+void resetWifiCred();
+
 
 #endif

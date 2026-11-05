@@ -4,10 +4,15 @@
 #include <Arduino.h>
 #include <WebServer.h>
 
+
+extern WebServer server;
+
 // Function declarations
-void turnONBLE();
-void setupHttpRoutes(WebServer &server);
-void handleRoot();
 void handleNotFound();
+void handleGetStatus();
+void handlewifiConfig();
+void initroutes();
+void httploop();
+void handlecalibrationConfig();
 
 #endif // HTTP_ROUTES_H

@@ -6,7 +6,7 @@
 
 // shared externs (defined in mqttcontrol.cpp and configControl.cpp)
 extern PubSubClient client;
-extern volatile bool drain_active;
+
 
 // keepalive topic (defined in configControl.cpp via strdup from NVS)
 extern const char* MQTT_KEEPALIVETOPIC;
@@ -16,7 +16,6 @@ void reconnect(const char* MQTT_SUBTOPIC, const char* MQTT_USERNAME, const char*
 bool publish(const char* topic, const String& payload);
 void callback(char* topic, byte* payload, unsigned int length);
 bool publish_device_info();
-bool publish_water_level_if_changed(float waterLevel);
-bool publish_keepalive_water_level(float waterLevel);
-
+bool publish_keepalive_RF_MOdule(float waterLevel);
+bool publish(const char* topic, const String& payload);
 #endif // MQTT_CONTROL_H
